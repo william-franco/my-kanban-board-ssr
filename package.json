@@ -1,9 +1,13 @@
 {
   "name": "my-kanban-board",
   "private": true,
-  "version": "0.0.0",
   "type": "module",
+  "license": "MIT",
+  "version": "1.0.0",
+  "author": "William Franco",
+  "description": "",
   "scripts": {
+    "clean": "rm -rf node_modules/ && rm -rf dist/ && npm install",
     "dev": "node server",
     "build": "npm run build:client && npm run build:server",
     "build:client": "vite build --outDir dist/client",
