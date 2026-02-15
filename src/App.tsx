@@ -1,44 +1,87 @@
-import React, { useState, useEffect, useRef, type DragEvent } from 'react';
-import { Search, Plus, X, Tag, Moon, Sun, Filter, Edit2, Trash2, GripVertical } from 'lucide-react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 
 // ============================================================================
 // TYPES & INTERFACES
 // ============================================================================
+
+type LabelColor = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | 'pink' | 'gray';
+
 interface Label {
   id: string;
   name: string;
-  color: string;
+  color: LabelColor;
 }
 
 interface Card {
   id: string;
   title: string;
   description: string;
-  labelIds: string[];
+  columnId: string;
+  labels: string[]; // Label IDs
+  order: number;
   createdAt: number;
 }
 
 interface Column {
   id: string;
   title: string;
-  cardIds: string[];
+  order: number;
+  color: string;
 }
 
-interface BoardState {
+interface BoardData {
   columns: Column[];
-  cards: Record<string, Card>;
+  cards: Card[];
   labels: Label[];
 }
 
+interface DragState {
+  draggedCard: Card | null;
+  sourceColumnId: string | null;
+  isDragging: boolean;
+}
+
 // ============================================================================
-// STORAGE SERVICE (Persistence Layer)
+// CONSTANTS
 // ============================================================================
+
 const isClient = typeof window !== 'undefined';
+
+const DEFAULT_LABELS: Label[] = [
+  { id: 'label_1', name: 'Urgente', color: 'red' },
+  { id: 'label_2', name: 'Bug', color: 'orange' },
+  { id: 'label_3', name: 'Feature', color: 'green' },
+  { id: 'label_4', name: 'Design', color: 'purple' },
+  { id: 'label_5', name: 'Documentação', color: 'blue' },
+  { id: 'label_6', name: 'Teste', color: 'yellow' },
+];
+
+const DEFAULT_COLUMNS: Column[] = [
+  { id: 'col_1', title: 'Backlog', order: 0, color: '#64748b' },
+  { id: 'col_2', title: 'Em Progresso', order: 1, color: '#3b82f6' },
+  { id: 'col_3', title: 'Revisão', order: 2, color: '#f59e0b' },
+  { id: 'col_4', title: 'Concluído', order: 3, color: '#10b981' },
+];
+
+const LABEL_COLORS: Record<LabelColor, string> = {
+  red: '#ef4444',
+  orange: '#f97316',
+  yellow: '#eab308',
+  green: '#10b981',
+  blue: '#3b82f6',
+  purple: '#8b5cf6',
+  pink: '#ec4899',
+  gray: '#6b7280',
+};
+
+// ============================================================================
+// STORAGE SERVICE
+// ============================================================================
 
 class StorageService {
   private static readonly STORAGE_KEYS = Object.freeze({
-    DARK_MODE: 'darkMode',
-    BOARD_STATE: 'kanbanBoardState',
+    DARK_MODE: 'kanban_darkMode',
+    BOARD_DATA: 'kanban_boardData',
   });
 
   /**
@@ -46,7 +89,6 @@ class StorageService {
    */
   static saveToStorage(key: string, value: any): void {
     if (!isClient) return;
-
     try {
       sessionStorage.setItem(key, JSON.stringify(value));
     } catch (error) {
@@ -59,13 +101,25 @@ class StorageService {
    */
   static loadFromStorage<T>(key: string, defaultValue: T): T {
     if (!isClient) return defaultValue;
-
     try {
       const saved = sessionStorage.getItem(key);
       return saved ? JSON.parse(saved) : defaultValue;
     } catch (error) {
       console.error(`Error loading ${key} from storage:`, error);
       return defaultValue;
+    }
+  }
+
+  /**
+   * Clear all app data from storage (client-side only)
+   */
+  static clearStorage(): void {
+    if (!isClient) return;
+    try {
+      sessionStorage.removeItem(this.STORAGE_KEYS.DARK_MODE);
+      sessionStorage.removeItem(this.STORAGE_KEYS.BOARD_DATA);
+    } catch (error) {
+      console.error('Error clearing storage:', error);
     }
   }
 
@@ -78,1453 +132,2211 @@ class StorageService {
 }
 
 // ============================================================================
-// MODEL (Business Logic & Data)
+// MODEL LAYER
 // ============================================================================
+
+/**
+ * Kanban Board Model - Handles data structure and business logic
+ */
 class KanbanModel {
-  /**
-   * Generate unique ID
-   */
-  static generateId(): string {
-    return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+  private columns: Column[];
+  private cards: Card[];
+  private labels: Label[];
+
+  constructor(initialData?: BoardData) {
+    this.columns = initialData?.columns || [...DEFAULT_COLUMNS];
+    this.cards = initialData?.cards || [];
+    this.labels = initialData?.labels || [...DEFAULT_LABELS];
   }
 
   /**
-   * Create default board state
+   * Get all board data
    */
-  static getDefaultBoardState(): BoardState {
-    const defaultLabels: Label[] = [
-      { id: 'label-1', name: 'Bug', color: '#ef4444' },
-      { id: 'label-2', name: 'Feature', color: '#3b82f6' },
-      { id: 'label-3', name: 'Enhancement', color: '#8b5cf6' },
-      { id: 'label-4', name: 'Documentation', color: '#10b981' },
-      { id: 'label-5', name: 'Design', color: '#f59e0b' },
-    ];
-
-    const sampleCards: Card[] = [
-      {
-        id: 'card-1',
-        title: 'Setup project structure',
-        description: 'Initialize React + TypeScript + Vite',
-        labelIds: ['label-2'],
-        createdAt: Date.now() - 3600000,
-      },
-      {
-        id: 'card-2',
-        title: 'Implement drag and drop',
-        description: 'Add DnD functionality for cards',
-        labelIds: ['label-2', 'label-3'],
-        createdAt: Date.now() - 7200000,
-      },
-      {
-        id: 'card-3',
-        title: 'Fix styling issues',
-        description: 'Resolve responsive layout problems',
-        labelIds: ['label-1'],
-        createdAt: Date.now() - 1800000,
-      },
-    ];
-
+  getAllData(): BoardData {
     return {
-      columns: [
-        { id: 'col-1', title: 'To Do', cardIds: ['card-1'] },
-        { id: 'col-2', title: 'In Progress', cardIds: ['card-2'] },
-        { id: 'col-3', title: 'Review', cardIds: [] },
-        { id: 'col-4', title: 'Done', cardIds: ['card-3'] },
-      ],
-      cards: sampleCards.reduce((acc, card) => {
-        acc[card.id] = card;
-        return acc;
-      }, {} as Record<string, Card>),
-      labels: defaultLabels,
+      columns: [...this.columns],
+      cards: [...this.cards],
+      labels: [...this.labels],
     };
   }
 
-  /**
-   * Filter cards by search query and selected labels
-   */
-  static filterCards(
-    cards: Card[],
-    searchQuery: string,
-    selectedLabelIds: string[]
-  ): Card[] {
-    return cards.filter((card) => {
-      const matchesSearch =
-        !searchQuery ||
-        card.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        card.description.toLowerCase().includes(searchQuery.toLowerCase());
-
-      const matchesLabels =
-        selectedLabelIds.length === 0 ||
-        selectedLabelIds.some((labelId) => card.labelIds.includes(labelId));
-
-      return matchesSearch && matchesLabels;
-    });
-  }
-}
-
-// ============================================================================
-// CONTROLLER (State Management & Business Logic)
-// ============================================================================
-class KanbanController {
-  private setState: React.Dispatch<React.SetStateAction<BoardState>>;
-
-  constructor(setState: React.Dispatch<React.SetStateAction<BoardState>>) {
-    this.setState = setState;
-  }
+  // ==================== COLUMN OPERATIONS ====================
 
   /**
-   * Load dark mode from storage
+   * Get all columns sorted by order
    */
-  static loadDarkMode(): boolean {
-    return StorageService.loadFromStorage(StorageService.getKeys().DARK_MODE, false);
-  }
-
-  /**
-   * Save dark mode to storage
-   */
-  static saveDarkMode(value: boolean): void {
-    StorageService.saveToStorage(StorageService.getKeys().DARK_MODE, value);
-  }
-
-  /**
-   * Load board state from storage
-   */
-  static loadBoardState(): BoardState {
-    return StorageService.loadFromStorage(
-      StorageService.getKeys().BOARD_STATE,
-      KanbanModel.getDefaultBoardState()
-    );
+  getColumns(): Column[] {
+    return [...this.columns].sort((a, b) => a.order - b.order);
   }
 
   /**
    * Add new column
    */
-  addColumn(title: string): void {
-    this.setState((prev) => {
-      const newColumn: Column = {
-        id: KanbanModel.generateId(),
-        title,
-        cardIds: [],
-      };
-      const newState = {
-        ...prev,
-        columns: [...prev.columns, newColumn],
-      };
-      StorageService.saveToStorage(StorageService.getKeys().BOARD_STATE, newState);
-      return newState;
-    });
+  addColumn(title: string, color: string): Column {
+    const newColumn: Column = {
+      id: `col_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      title,
+      order: this.columns.length,
+      color,
+    };
+    this.columns.push(newColumn);
+    return newColumn;
   }
 
   /**
-   * Update column title
+   * Update column
    */
-  updateColumnTitle(columnId: string, newTitle: string): void {
-    this.setState((prev) => {
-      const newState = {
-        ...prev,
-        columns: prev.columns.map((col) =>
-          col.id === columnId ? { ...col, title: newTitle } : col
-        ),
-      };
-      StorageService.saveToStorage(StorageService.getKeys().BOARD_STATE, newState);
-      return newState;
-    });
+  updateColumn(id: string, updates: Partial<Column>): Column | null {
+    const index = this.columns.findIndex(c => c.id === id);
+    if (index === -1) return null;
+
+    this.columns[index] = { ...this.columns[index], ...updates };
+    return this.columns[index];
   }
 
   /**
    * Delete column and its cards
    */
-  deleteColumn(columnId: string): void {
-    this.setState((prev) => {
-      const column = prev.columns.find((c) => c.id === columnId);
-      if (!column) return prev;
-
-      const newCards = { ...prev.cards };
-      column.cardIds.forEach((cardId) => delete newCards[cardId]);
-
-      const newState = {
-        ...prev,
-        columns: prev.columns.filter((col) => col.id !== columnId),
-        cards: newCards,
-      };
-      StorageService.saveToStorage(StorageService.getKeys().BOARD_STATE, newState);
-      return newState;
-    });
+  deleteColumn(id: string): boolean {
+    const initialLength = this.columns.length;
+    this.columns = this.columns.filter(c => c.id !== id);
+    this.cards = this.cards.filter(c => c.columnId !== id);
+    return this.columns.length < initialLength;
   }
 
   /**
-   * Add new card to column
+   * Reorder columns
    */
-  addCard(columnId: string, title: string, description: string, labelIds: string[]): void {
-    this.setState((prev) => {
-      const newCard: Card = {
-        id: KanbanModel.generateId(),
-        title,
-        description,
-        labelIds,
-        createdAt: Date.now(),
-      };
-
-      const newState = {
-        ...prev,
-        cards: { ...prev.cards, [newCard.id]: newCard },
-        columns: prev.columns.map((col) =>
-          col.id === columnId ? { ...col, cardIds: [...col.cardIds, newCard.id] } : col
-        ),
-      };
-      StorageService.saveToStorage(StorageService.getKeys().BOARD_STATE, newState);
-      return newState;
+  reorderColumns(columnIds: string[]): void {
+    columnIds.forEach((id, index) => {
+      const column = this.columns.find(c => c.id === id);
+      if (column) column.order = index;
     });
+  }
+
+  // ==================== CARD OPERATIONS ====================
+
+  /**
+   * Get cards by column ID
+   */
+  getCardsByColumn(columnId: string): Card[] {
+    return this.cards
+      .filter(c => c.columnId === columnId)
+      .sort((a, b) => a.order - b.order);
+  }
+
+  /**
+   * Add new card
+   */
+  addCard(card: Omit<Card, 'id' | 'createdAt' | 'order'>): Card {
+    const columnCards = this.getCardsByColumn(card.columnId);
+    const newCard: Card = {
+      ...card,
+      id: `card_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      order: columnCards.length,
+      createdAt: Date.now(),
+    };
+    this.cards.push(newCard);
+    return newCard;
   }
 
   /**
    * Update card
    */
-  updateCard(cardId: string, updates: Partial<Card>): void {
-    this.setState((prev) => {
-      const newState = {
-        ...prev,
-        cards: {
-          ...prev.cards,
-          [cardId]: { ...prev.cards[cardId], ...updates },
-        },
-      };
-      StorageService.saveToStorage(StorageService.getKeys().BOARD_STATE, newState);
-      return newState;
-    });
+  updateCard(id: string, updates: Partial<Card>): Card | null {
+    const index = this.cards.findIndex(c => c.id === id);
+    if (index === -1) return null;
+
+    this.cards[index] = { ...this.cards[index], ...updates };
+    return this.cards[index];
   }
 
   /**
    * Delete card
    */
-  deleteCard(cardId: string): void {
-    this.setState((prev) => {
-      const newCards = { ...prev.cards };
-      delete newCards[cardId];
-
-      const newState = {
-        ...prev,
-        cards: newCards,
-        columns: prev.columns.map((col) => ({
-          ...col,
-          cardIds: col.cardIds.filter((id) => id !== cardId),
-        })),
-      };
-      StorageService.saveToStorage(StorageService.getKeys().BOARD_STATE, newState);
-      return newState;
-    });
+  deleteCard(id: string): boolean {
+    const initialLength = this.cards.length;
+    this.cards = this.cards.filter(c => c.id !== id);
+    return this.cards.length < initialLength;
   }
 
   /**
-   * Move card between columns or reorder within column
+   * Move card to different column
    */
-  moveCard(cardId: string, sourceColId: string, destColId: string, destIndex: number): void {
-    this.setState((prev) => {
-      const newColumns = prev.columns.map((col) => {
-        if (col.id === sourceColId) {
-          return { ...col, cardIds: col.cardIds.filter((id) => id !== cardId) };
-        }
-        if (col.id === destColId) {
-          const newCardIds = [...col.cardIds];
-          newCardIds.splice(destIndex, 0, cardId);
-          return { ...col, cardIds: newCardIds };
-        }
-        return col;
-      });
+  moveCard(cardId: string, targetColumnId: string, targetOrder: number): Card | null {
+    const card = this.cards.find(c => c.id === cardId);
+    if (!card) return null;
 
-      const newState = { ...prev, columns: newColumns };
-      StorageService.saveToStorage(StorageService.getKeys().BOARD_STATE, newState);
-      return newState;
-    });
+    const sourceColumnId = card.columnId;
+
+    // Remove card from source column and update orders
+    if (sourceColumnId !== targetColumnId) {
+      const sourceCards = this.getCardsByColumn(sourceColumnId);
+      sourceCards
+        .filter(c => c.order > card.order)
+        .forEach(c => c.order--);
+    }
+
+    // Insert card into target column
+    const targetCards = this.getCardsByColumn(targetColumnId);
+    targetCards
+      .filter(c => c.order >= targetOrder)
+      .forEach(c => c.order++);
+
+    // Update card
+    card.columnId = targetColumnId;
+    card.order = targetOrder;
+
+    return card;
+  }
+
+  /**
+   * Search cards by term
+   */
+  searchCards(term: string): Card[] {
+    const lowerTerm = term.toLowerCase();
+    return this.cards.filter(c =>
+      c.title.toLowerCase().includes(lowerTerm) ||
+      c.description.toLowerCase().includes(lowerTerm)
+    );
+  }
+
+  /**
+   * Filter cards by label IDs
+   */
+  filterCardsByLabels(labelIds: string[]): Card[] {
+    if (labelIds.length === 0) return this.cards;
+    return this.cards.filter(card =>
+      labelIds.some(labelId => card.labels.includes(labelId))
+    );
+  }
+
+  // ==================== LABEL OPERATIONS ====================
+
+  /**
+   * Get all labels
+   */
+  getLabels(): Label[] {
+    return [...this.labels];
   }
 
   /**
    * Add new label
    */
-  addLabel(name: string, color: string): void {
-    this.setState((prev) => {
-      const newLabel: Label = {
-        id: KanbanModel.generateId(),
-        name,
-        color,
-      };
+  addLabel(name: string, color: LabelColor): Label {
+    const newLabel: Label = {
+      id: `label_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      name,
+      color,
+    };
+    this.labels.push(newLabel);
+    return newLabel;
+  }
 
-      const newState = {
-        ...prev,
-        labels: [...prev.labels, newLabel],
-      };
-      StorageService.saveToStorage(StorageService.getKeys().BOARD_STATE, newState);
-      return newState;
+  /**
+   * Update label
+   */
+  updateLabel(id: string, updates: Partial<Label>): Label | null {
+    const index = this.labels.findIndex(l => l.id === id);
+    if (index === -1) return null;
+
+    this.labels[index] = { ...this.labels[index], ...updates };
+    return this.labels[index];
+  }
+
+  /**
+   * Delete label
+   */
+  deleteLabel(id: string): boolean {
+    const initialLength = this.labels.length;
+    this.labels = this.labels.filter(l => l.id !== id);
+
+    // Remove label from all cards
+    this.cards.forEach(card => {
+      card.labels = card.labels.filter(labelId => labelId !== id);
     });
+
+    return this.labels.length < initialLength;
+  }
+
+  /**
+   * Sync to storage
+   */
+  syncToStorage(): void {
+    StorageService.saveToStorage(
+      StorageService.getKeys().BOARD_DATA,
+      this.getAllData()
+    );
+  }
+
+  /**
+   * Load from storage
+   */
+  static loadFromStorage(): KanbanModel {
+    const data = StorageService.loadFromStorage<BoardData | null>(
+      StorageService.getKeys().BOARD_DATA,
+      null
+    );
+    return new KanbanModel(data || undefined);
   }
 }
 
 // ============================================================================
-// VIEW COMPONENTS (UI Layer)
+// CONTROLLER LAYER
 // ============================================================================
+
 /**
- * Main Kanban Board Component with SSR support
+ * Kanban Controller - Manages state and coordinates between Model and View
  */
-// Substitua o componente principal App() por esta versão corrigida:
+class KanbanController {
+  private model: KanbanModel;
+  private listeners: Set<() => void>;
 
-export default function App() {
-  const [boardState, setBoardState] = useState<BoardState>({
-    columns: [],
-    cards: {},
-    labels: [],
-  });
-  const [isDarkMode, setIsDarkMode] = useState<boolean>(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedLabelIds, setSelectedLabelIds] = useState<string[]>([]);
-  const [showFilters, setShowFilters] = useState(false);
-  const [isHydrated, setIsHydrated] = useState(false);
+  constructor(model: KanbanModel) {
+    this.model = model;
+    this.listeners = new Set();
+  }
 
-  // Criar controller com useMemo para garantir instância estável
-  const controller = React.useMemo(() => new KanbanController(setBoardState), []);
+  /**
+   * Subscribe to changes
+   */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
 
-  // Hydration effect - load data only on client-side
-  useEffect(() => {
-    setBoardState(KanbanController.loadBoardState());
-    setIsDarkMode(KanbanController.loadDarkMode());
-    setIsHydrated(true);
-  }, []);
+  /**
+   * Notify all listeners of changes
+   */
+  private notify(): void {
+    this.listeners.forEach(listener => listener());
+    this.model.syncToStorage();
+  }
 
-  // Dark mode toggle
-  const toggleDarkMode = () => {
-    setIsDarkMode((prev) => {
-      const newValue = !prev;
-      KanbanController.saveDarkMode(newValue);
-      return newValue;
-    });
-  };
+  // ==================== COLUMN METHODS ====================
 
-  // Toggle label filter
-  const toggleLabelFilter = (labelId: string) => {
-    setSelectedLabelIds((prev) =>
-      prev.includes(labelId) ? prev.filter((id) => id !== labelId) : [...prev, labelId]
-    );
-  };
+  getColumns(): Column[] {
+    return this.model.getColumns();
+  }
 
-  useEffect(() => {
-    if (!isClient) return;
-    document.documentElement.classList.toggle('dark', isDarkMode);
-  }, [isDarkMode]);
+  addColumn(title: string, color: string): void {
+    this.model.addColumn(title, color);
+    this.notify();
+  }
 
-  return (
-    <div className={`app-container ${isDarkMode ? 'dark' : ''}`}>
-      <style>{APP_STYLES}</style>
+  updateColumn(id: string, updates: Partial<Column>): void {
+    this.model.updateColumn(id, updates);
+    this.notify();
+  }
 
-      {/* Header */}
-      <header className="app-header">
-        <div className="header-content">
-          <div className="header-left">
-            <h1 className="app-title">Kanban Board</h1>
-            <span className="board-subtitle">Organize your workflow</span>
-          </div>
-          <div className="header-actions">
-            {/* Search */}
-            <div className="search-container">
-              <Search className="search-icon" size={18} />
-              <input
-                type="text"
-                placeholder="Search cards..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="search-input"
-              />
-            </div>
-            {/* Filter Toggle */}
-            <button
-              onClick={() => setShowFilters(!showFilters)}
-              className={`filter-button ${showFilters ? 'active' : ''}`}
-            >
-              <Filter size={18} />
-            </button>
-            {/* Dark Mode Toggle */}
-            <button onClick={toggleDarkMode} className="theme-toggle" aria-label="Toggle theme">
-              {isDarkMode ? <Sun size={20} /> : <Moon size={20} />}
-            </button>
-          </div>
-        </div>
-        {/* Filter Panel */}
-        {showFilters && (
-          <div className="filter-panel">
-            <h3 className="filter-title">Filter by Labels</h3>
-            <div className="label-filters">
-              {boardState.labels.map((label) => (
-                <button
-                  key={label.id}
-                  onClick={() => toggleLabelFilter(label.id)}
-                  className={`label-filter ${selectedLabelIds.includes(label.id) ? 'active' : ''}`}
-                  style={{
-                    '--label-color': label.color,
-                  } as React.CSSProperties}
-                >
-                  <Tag size={14} />
-                  {label.name}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-      </header>
+  deleteColumn(id: string): void {
+    this.model.deleteColumn(id);
+    this.notify();
+  }
 
-      {/* Kanban Board */}
-      <main className="board-container">
-        <div className="columns-wrapper">
-          {boardState.columns.map((column) => (
-            <ColumnView
-              key={column.id}
-              column={column}
-              cards={column.cardIds.map((id) => boardState.cards[id]).filter(Boolean)}
-              labels={boardState.labels}
-              controller={controller}
-              searchQuery={searchQuery}
-              selectedLabelIds={selectedLabelIds}
-            />
-          ))}
-          {/* Add Column Button */}
-          <AddColumnButton controller={controller} />
-        </div>
-      </main>
-    </div>
-  );
+  reorderColumns(columnIds: string[]): void {
+    this.model.reorderColumns(columnIds);
+    this.notify();
+  }
+
+  // ==================== CARD METHODS ====================
+
+  getCardsByColumn(columnId: string): Card[] {
+    return this.model.getCardsByColumn(columnId);
+  }
+
+  addCard(card: Omit<Card, 'id' | 'createdAt' | 'order'>): void {
+    this.model.addCard(card);
+    this.notify();
+  }
+
+  updateCard(id: string, updates: Partial<Card>): void {
+    this.model.updateCard(id, updates);
+    this.notify();
+  }
+
+  deleteCard(id: string): void {
+    this.model.deleteCard(id);
+    this.notify();
+  }
+
+  moveCard(cardId: string, targetColumnId: string, targetOrder: number): void {
+    this.model.moveCard(cardId, targetColumnId, targetOrder);
+    this.notify();
+  }
+
+  searchCards(term: string): Card[] {
+    return this.model.searchCards(term);
+  }
+
+  filterCardsByLabels(labelIds: string[]): Card[] {
+    return this.model.filterCardsByLabels(labelIds);
+  }
+
+  // ==================== LABEL METHODS ====================
+
+  getLabels(): Label[] {
+    return this.model.getLabels();
+  }
+
+  addLabel(name: string, color: LabelColor): void {
+    this.model.addLabel(name, color);
+    this.notify();
+  }
+
+  updateLabel(id: string, updates: Partial<Label>): void {
+    this.model.updateLabel(id, updates);
+    this.notify();
+  }
+
+  deleteLabel(id: string): void {
+    this.model.deleteLabel(id);
+    this.notify();
+  }
 }
 
+// ============================================================================
+// VIEW COMPONENTS
+// ============================================================================
+
 /**
- * Column Component
+ * Header Component with theme toggle
  */
-function ColumnView({
-  column,
-  cards,
-  labels,
-  controller,
-  searchQuery,
-  selectedLabelIds,
-}: {
-  column: Column;
-  cards: Card[];
-  labels: Label[];
-  controller: KanbanController;
-  searchQuery: string;
-  selectedLabelIds: string[];
-}) {
-  const [isEditing, setIsEditing] = useState(false);
-  const [title, setTitle] = useState(column.title);
-  const [showAddCard, setShowAddCard] = useState(false);
-  const [draggedOver, setDraggedOver] = useState(false);
-
-  const filteredCards = KanbanModel.filterCards(cards, searchQuery, selectedLabelIds);
-
-  const handleTitleSubmit = () => {
-    if (title.trim()) {
-      controller.updateColumnTitle(column.id, title.trim());
-    }
-    setIsEditing(false);
-  };
-
-  const handleDragOver = (e: DragEvent) => {
-    e.preventDefault();
-    setDraggedOver(true);
-  };
-
-  const handleDragLeave = () => {
-    setDraggedOver(false);
-  };
-
-  const handleDrop = (e: DragEvent) => {
-    e.preventDefault();
-    setDraggedOver(false);
-
-    const cardId = e.dataTransfer.getData('cardId');
-    const sourceColId = e.dataTransfer.getData('sourceColId');
-
-    if (cardId && sourceColId) {
-      controller.moveCard(cardId, sourceColId, column.id, filteredCards.length);
-    }
-  };
-
+const Header: React.FC<{
+  darkMode: boolean;
+  toggleTheme: () => void;
+  onAddColumn: () => void;
+}> = ({ darkMode, toggleTheme, onAddColumn }) => {
   return (
-    <div className="column">
-      <div className="column-header">
-        {isEditing ? (
-          <input
-            type="text"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            onBlur={handleTitleSubmit}
-            onKeyPress={(e) => e.key === 'Enter' && handleTitleSubmit()}
-            className="column-title-input"
-            autoFocus
-          />
-        ) : (
-          <h2 className="column-title" onClick={() => setIsEditing(true)}>
-            {column.title}
-            <span className="card-count">{filteredCards.length}</span>
-          </h2>
-        )}
-        <button
-          onClick={() => controller.deleteColumn(column.id)}
-          className="column-delete"
-          aria-label="Delete column"
-        >
-          <Trash2 size={16} />
-        </button>
+    <header className="header">
+      <div className="header-content">
+        <div className="header-title">
+          <svg className="header-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2" />
+          </svg>
+          <h1>Kanban Board</h1>
+        </div>
+        <div className="header-actions">
+          <button onClick={onAddColumn} className="btn-add-column">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            Nova Coluna
+          </button>
+          <button onClick={toggleTheme} className="theme-toggle" aria-label="Toggle theme">
+            {darkMode ? (
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+              </svg>
+            ) : (
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+              </svg>
+            )}
+          </button>
+        </div>
       </div>
-      <div
-        className={`cards-container ${draggedOver ? 'drag-over' : ''}`}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-      >
-        {filteredCards.map((card, index) => (
-          <CardView
-            key={card.id}
-            card={card}
-            labels={labels}
-            controller={controller}
-            columnId={column.id}
-            index={index}
-          />
-        ))}
-        {filteredCards.length === 0 && (
-          <div className="empty-column">
-            <p>No cards yet</p>
-          </div>
-        )}
-      </div>
-      {showAddCard ? (
-        <AddCardForm
-          columnId={column.id}
-          labels={labels}
-          controller={controller}
-          onCancel={() => setShowAddCard(false)}
-        />
-      ) : (
-        <button onClick={() => setShowAddCard(true)} className="add-card-button">
-          <Plus size={16} />
-          Add Card
-        </button>
-      )}
-    </div>
+    </header>
   );
-}
+};
 
 /**
- * Card Component with Drag and Drop
+ * Search and Filter Bar Component
  */
-function CardView({
-  card,
-  labels,
-  controller,
-  columnId,
-  index,
-}: {
-  card: Card;
+const FilterBar: React.FC<{
+  searchTerm: string;
+  onSearchChange: (term: string) => void;
+  selectedLabels: string[];
+  onLabelToggle: (labelId: string) => void;
   labels: Label[];
-  controller: KanbanController;
-  columnId: string;
-  index: number;
-}) {
-  const [isEditing, setIsEditing] = useState(false);
-  const [title, setTitle] = useState(card.title);
-  const [description, setDescription] = useState(card.description);
-  const [selectedLabels, setSelectedLabels] = useState(card.labelIds);
-
-  const handleDragStart = (e: DragEvent) => {
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('cardId', card.id);
-    e.dataTransfer.setData('sourceColId', columnId);
-  };
-
-  const handleSave = () => {
-    controller.updateCard(card.id, {
-      title: title.trim() || 'Untitled',
-      description: description.trim(),
-      labelIds: selectedLabels,
-    });
-    setIsEditing(false);
-  };
-
-  const toggleLabel = (labelId: string) => {
-    setSelectedLabels((prev) =>
-      prev.includes(labelId) ? prev.filter((id) => id !== labelId) : [...prev, labelId]
-    );
-  };
-
-  if (isEditing) {
-    return (
-      <div className="card editing">
+  onManageLabels: () => void;
+}> = ({ searchTerm, onSearchChange, selectedLabels, onLabelToggle, labels, onManageLabels }) => {
+  return (
+    <div className="filter-bar">
+      <div className="search-box">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+        </svg>
         <input
           type="text"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          className="card-edit-title"
-          placeholder="Card title"
-          autoFocus
+          placeholder="Buscar cards..."
+          value={searchTerm}
+          onChange={e => onSearchChange(e.target.value)}
         />
-        <textarea
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          className="card-edit-description"
-          placeholder="Description"
-          rows={3}
-        />
-        <div className="card-labels-edit">
-          {labels.map((label) => (
-            <button
-              key={label.id}
-              onClick={() => toggleLabel(label.id)}
-              className={`label-tag ${selectedLabels.includes(label.id) ? 'selected' : ''}`}
-              style={{ backgroundColor: label.color }}
-            >
-              {label.name}
-            </button>
-          ))}
-        </div>
-        <div className="card-edit-actions">
-          <button onClick={handleSave} className="btn-save">
-            Save
-          </button>
-          <button onClick={() => setIsEditing(false)} className="btn-cancel">
-            Cancel
-          </button>
-        </div>
       </div>
-    );
-  }
 
-  return (
-    <div className="card" draggable onDragStart={handleDragStart}>
-      <div className="card-header">
-        <GripVertical size={14} className="drag-handle" />
-        <div className="card-actions">
-          <button onClick={() => setIsEditing(true)} className="card-action">
-            <Edit2 size={14} />
-          </button>
-          <button onClick={() => controller.deleteCard(card.id)} className="card-action">
-            <Trash2 size={14} />
-          </button>
-        </div>
-      </div>
-      <h3 className="card-title">{card.title}</h3>
-      {card.description && <p className="card-description">{card.description}</p>}
-      {card.labelIds.length > 0 && (
-        <div className="card-labels">
-          {card.labelIds.map((labelId) => {
-            const label = labels.find((l) => l.id === labelId);
-            return label ? (
-              <span key={labelId} className="label-tag" style={{ backgroundColor: label.color }}>
-                {label.name}
-              </span>
-            ) : null;
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * Add Card Form Component
- */
-function AddCardForm({
-  columnId,
-  labels,
-  controller,
-  onCancel,
-}: {
-  columnId: string;
-  labels: Label[];
-  controller: KanbanController;
-  onCancel: () => void;
-}) {
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [selectedLabels, setSelectedLabels] = useState<string[]>([]);
-
-  const handleSubmit = () => {
-    if (title.trim()) {
-      controller.addCard(columnId, title.trim(), description.trim(), selectedLabels);
-      setTitle('');
-      setDescription('');
-      setSelectedLabels([]);
-      onCancel();
-    }
-  };
-
-  const toggleLabel = (labelId: string) => {
-    setSelectedLabels((prev) =>
-      prev.includes(labelId) ? prev.filter((id) => id !== labelId) : [...prev, labelId]
-    );
-  };
-
-  return (
-    <div className="add-card-form">
-      <input
-        type="text"
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        placeholder="Card title"
-        className="form-input"
-        autoFocus
-      />
-      <textarea
-        value={description}
-        onChange={(e) => setDescription(e.target.value)}
-        placeholder="Description (optional)"
-        className="form-textarea"
-        rows={2}
-      />
-      <div className="form-labels">
-        {labels.map((label) => (
+      <div className="label-filters">
+        <button onClick={onManageLabels} className="manage-labels-btn">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+          </svg>
+          Gerenciar Labels
+        </button>
+        {labels.map(label => (
           <button
             key={label.id}
-            onClick={() => toggleLabel(label.id)}
-            className={`label-tag ${selectedLabels.includes(label.id) ? 'selected' : ''}`}
-            style={{ backgroundColor: label.color }}
+            onClick={() => onLabelToggle(label.id)}
+            className={`label-filter ${selectedLabels.includes(label.id) ? 'active' : ''}`}
+            style={{
+              backgroundColor: selectedLabels.includes(label.id)
+                ? LABEL_COLORS[label.color]
+                : 'transparent',
+              borderColor: LABEL_COLORS[label.color],
+              color: selectedLabels.includes(label.id) ? '#fff' : 'currentColor'
+            }}
           >
             {label.name}
           </button>
         ))}
       </div>
-      <div className="form-actions">
-        <button onClick={handleSubmit} className="btn-primary">
-          Add Card
-        </button>
-        <button onClick={onCancel} className="btn-secondary">
-          Cancel
-        </button>
-      </div>
     </div>
   );
-}
+};
 
 /**
- * Add Column Button Component
+ * Card Component with inline editing
  */
-function AddColumnButton({ controller }: { controller: KanbanController }) {
-  const [isAdding, setIsAdding] = useState(false);
-  const [title, setTitle] = useState('');
+const CardComponent: React.FC<{
+  card: Card;
+  labels: Label[];
+  onUpdate: (updates: Partial<Card>) => void;
+  onDelete: () => void;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+}> = ({ card, labels, onUpdate, onDelete, onDragStart, onDragEnd }) => {
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [isEditingDescription, setIsEditingDescription] = useState(false);
+  const [editTitle, setEditTitle] = useState(card.title);
+  const [editDescription, setEditDescription] = useState(card.description);
+  const [showLabels, setShowLabels] = useState(false);
 
-  const handleSubmit = () => {
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  const descriptionTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (isEditingTitle && titleInputRef.current) {
+      titleInputRef.current.focus();
+      titleInputRef.current.select();
+    }
+  }, [isEditingTitle]);
+
+  useEffect(() => {
+    if (isEditingDescription && descriptionTextareaRef.current) {
+      descriptionTextareaRef.current.focus();
+    }
+  }, [isEditingDescription]);
+
+  const handleTitleSave = () => {
+    if (editTitle.trim() && editTitle !== card.title) {
+      onUpdate({ title: editTitle.trim() });
+    } else {
+      setEditTitle(card.title);
+    }
+    setIsEditingTitle(false);
+  };
+
+  const handleDescriptionSave = () => {
+    if (editDescription !== card.description) {
+      onUpdate({ description: editDescription });
+    }
+    setIsEditingDescription(false);
+  };
+
+  const toggleLabel = (labelId: string) => {
+    const newLabels = card.labels.includes(labelId)
+      ? card.labels.filter(id => id !== labelId)
+      : [...card.labels, labelId];
+    onUpdate({ labels: newLabels });
+  };
+
+  const cardLabels = labels.filter(l => card.labels.includes(l.id));
+
+  return (
+    <div
+      className="card"
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+    >
+      <div className="card-header">
+        {isEditingTitle ? (
+          <input
+            ref={titleInputRef}
+            type="text"
+            value={editTitle}
+            onChange={e => setEditTitle(e.target.value)}
+            onBlur={handleTitleSave}
+            onKeyDown={e => {
+              if (e.key === 'Enter') handleTitleSave();
+              if (e.key === 'Escape') {
+                setEditTitle(card.title);
+                setIsEditingTitle(false);
+              }
+            }}
+            className="card-title-input"
+          />
+        ) : (
+          <h4 onClick={() => setIsEditingTitle(true)} className="card-title">
+            {card.title}
+          </h4>
+        )}
+        <button onClick={onDelete} className="card-delete" aria-label="Excluir card">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+
+      {cardLabels.length > 0 && (
+        <div className="card-labels">
+          {cardLabels.map(label => (
+            <span
+              key={label.id}
+              className="card-label"
+              style={{ backgroundColor: LABEL_COLORS[label.color] }}
+            >
+              {label.name}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {isEditingDescription ? (
+        <textarea
+          ref={descriptionTextareaRef}
+          value={editDescription}
+          onChange={e => setEditDescription(e.target.value)}
+          onBlur={handleDescriptionSave}
+          className="card-description-textarea"
+          rows={3}
+        />
+      ) : (
+        <p
+          onClick={() => setIsEditingDescription(true)}
+          className="card-description"
+        >
+          {card.description || 'Clique para adicionar descrição...'}
+        </p>
+      )}
+
+      <div className="card-footer">
+        <button
+          onClick={() => setShowLabels(!showLabels)}
+          className="btn-add-label"
+        >
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+          </svg>
+          Labels
+        </button>
+      </div>
+
+      {showLabels && (
+        <div className="label-selector">
+          {labels.map(label => (
+            <button
+              key={label.id}
+              onClick={() => toggleLabel(label.id)}
+              className={`label-option ${card.labels.includes(label.id) ? 'selected' : ''}`}
+              style={{
+                backgroundColor: LABEL_COLORS[label.color],
+                opacity: card.labels.includes(label.id) ? 1 : 0.6
+              }}
+            >
+              {label.name}
+              {card.labels.includes(label.id) && (
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * Column Component with drag and drop
+ */
+const ColumnComponent: React.FC<{
+  column: Column;
+  cards: Card[];
+  labels: Label[];
+  onAddCard: () => void;
+  onUpdateCard: (cardId: string, updates: Partial<Card>) => void;
+  onDeleteCard: (cardId: string) => void;
+  onUpdateColumn: (updates: Partial<Column>) => void;
+  onDeleteColumn: () => void;
+  onCardDragStart: (card: Card) => void;
+  onCardDragEnd: () => void;
+  onCardDrop: (targetOrder: number) => void;
+  isDraggingOver: boolean;
+}> = ({
+  column,
+  cards,
+  labels,
+  onAddCard,
+  onUpdateCard,
+  onDeleteCard,
+  onUpdateColumn,
+  onDeleteColumn,
+  onCardDragStart,
+  onCardDragEnd,
+  onCardDrop,
+  isDraggingOver
+}) => {
+    const [isEditingTitle, setIsEditingTitle] = useState(false);
+    const [editTitle, setEditTitle] = useState(column.title);
+    const titleInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+      if (isEditingTitle && titleInputRef.current) {
+        titleInputRef.current.focus();
+        titleInputRef.current.select();
+      }
+    }, [isEditingTitle]);
+
+    const handleTitleSave = () => {
+      if (editTitle.trim() && editTitle !== column.title) {
+        onUpdateColumn({ title: editTitle.trim() });
+      } else {
+        setEditTitle(column.title);
+      }
+      setIsEditingTitle(false);
+    };
+
+    const handleDragOver = (e: React.DragEvent) => {
+      e.preventDefault();
+    };
+
+    const handleDrop = (e: React.DragEvent) => {
+      e.preventDefault();
+      onCardDrop(cards.length);
+    };
+
+    return (
+      <div
+        className={`column ${isDraggingOver ? 'drag-over' : ''}`}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+      >
+        <div className="column-header" style={{ borderTopColor: column.color }}>
+          {isEditingTitle ? (
+            <input
+              ref={titleInputRef}
+              type="text"
+              value={editTitle}
+              onChange={e => setEditTitle(e.target.value)}
+              onBlur={handleTitleSave}
+              onKeyDown={e => {
+                if (e.key === 'Enter') handleTitleSave();
+                if (e.key === 'Escape') {
+                  setEditTitle(column.title);
+                  setIsEditingTitle(false);
+                }
+              }}
+              className="column-title-input"
+            />
+          ) : (
+            <h3 onClick={() => setIsEditingTitle(true)} className="column-title">
+              {column.title}
+              <span className="card-count">{cards.length}</span>
+            </h3>
+          )}
+          <div className="column-actions">
+            <button onClick={onAddCard} className="btn-add-card" aria-label="Adicionar card">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+            </button>
+            <button onClick={onDeleteColumn} className="btn-delete-column" aria-label="Excluir coluna">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div className="cards-container">
+          {cards.map(card => (
+            <CardComponent
+              key={card.id}
+              card={card}
+              labels={labels}
+              onUpdate={updates => onUpdateCard(card.id, updates)}
+              onDelete={() => onDeleteCard(card.id)}
+              onDragStart={() => onCardDragStart(card)}
+              onDragEnd={onCardDragEnd}
+            />
+          ))}
+          {cards.length === 0 && (
+            <div className="empty-column">
+              <p>Arraste cards aqui ou clique no + para adicionar</p>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+/**
+ * Modal for adding new card
+ */
+const AddCardModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  onAdd: (title: string, description: string) => void;
+}> = ({ isOpen, onClose, onAdd }) => {
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+
+  if (!isOpen) return null;
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
     if (title.trim()) {
-      controller.addColumn(title.trim());
+      onAdd(title.trim(), description.trim());
       setTitle('');
-      setIsAdding(false);
+      setDescription('');
+      onClose();
     }
   };
 
-  if (isAdding) {
-    return (
-      <div className="add-column-form">
-        <input
-          type="text"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          onBlur={handleSubmit}
-          onKeyPress={(e) => e.key === 'Enter' && handleSubmit()}
-          placeholder="Column name"
-          className="column-name-input"
-          autoFocus
-        />
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>Novo Card</h2>
+          <button onClick={onClose} className="modal-close">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <form onSubmit={handleSubmit}>
+          <div className="form-group">
+            <label>Título *</label>
+            <input
+              type="text"
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              placeholder="Digite o título do card"
+              required
+              autoFocus
+            />
+          </div>
+          <div className="form-group">
+            <label>Descrição</label>
+            <textarea
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+              placeholder="Digite a descrição (opcional)"
+              rows={4}
+            />
+          </div>
+          <div className="modal-actions">
+            <button type="button" onClick={onClose} className="btn-secondary">
+              Cancelar
+            </button>
+            <button type="submit" className="btn-primary">
+              Adicionar
+            </button>
+          </div>
+        </form>
       </div>
-    );
-  }
+    </div>
+  );
+};
+
+/**
+ * Modal for adding new column
+ */
+const AddColumnModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  onAdd: (title: string, color: string) => void;
+}> = ({ isOpen, onClose, onAdd }) => {
+  const [title, setTitle] = useState('');
+  const [color, setColor] = useState('#3b82f6');
+
+  if (!isOpen) return null;
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (title.trim()) {
+      onAdd(title.trim(), color);
+      setTitle('');
+      setColor('#3b82f6');
+      onClose();
+    }
+  };
+
+  const colorPresets = [
+    '#ef4444', '#f97316', '#f59e0b', '#84cc16',
+    '#10b981', '#14b8a6', '#3b82f6', '#6366f1',
+    '#8b5cf6', '#d946ef', '#ec4899', '#64748b'
+  ];
 
   return (
-    <button onClick={() => setIsAdding(true)} className="add-column-button">
-      <Plus size={20} />
-      Add Column
-    </button>
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>Nova Coluna</h2>
+          <button onClick={onClose} className="modal-close">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <form onSubmit={handleSubmit}>
+          <div className="form-group">
+            <label>Título *</label>
+            <input
+              type="text"
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              placeholder="Digite o título da coluna"
+              required
+              autoFocus
+            />
+          </div>
+          <div className="form-group">
+            <label>Cor da Coluna</label>
+            <div className="color-picker">
+              {colorPresets.map(presetColor => (
+                <button
+                  key={presetColor}
+                  type="button"
+                  className={`color-option ${color === presetColor ? 'selected' : ''}`}
+                  style={{ backgroundColor: presetColor }}
+                  onClick={() => setColor(presetColor)}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="modal-actions">
+            <button type="button" onClick={onClose} className="btn-secondary">
+              Cancelar
+            </button>
+            <button type="submit" className="btn-primary">
+              Adicionar
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
-}
+};
+
+/**
+ * Modal for managing labels
+ */
+const ManageLabelsModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  labels: Label[];
+  onAddLabel: (name: string, color: LabelColor) => void;
+  onUpdateLabel: (id: string, name: string) => void;
+  onDeleteLabel: (id: string) => void;
+}> = ({ isOpen, onClose, labels, onAddLabel, onUpdateLabel, onDeleteLabel }) => {
+  const [newLabelName, setNewLabelName] = useState('');
+  const [newLabelColor, setNewLabelColor] = useState<LabelColor>('blue');
+  const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
+  const [editingLabelName, setEditingLabelName] = useState('');
+
+  if (!isOpen) return null;
+
+  const handleAddLabel = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newLabelName.trim()) {
+      onAddLabel(newLabelName.trim(), newLabelColor);
+      setNewLabelName('');
+      setNewLabelColor('blue');
+    }
+  };
+
+  const handleUpdateLabel = (id: string) => {
+    if (editingLabelName.trim()) {
+      onUpdateLabel(id, editingLabelName.trim());
+      setEditingLabelId(null);
+      setEditingLabelName('');
+    }
+  };
+
+  const startEditing = (label: Label) => {
+    setEditingLabelId(label.id);
+    setEditingLabelName(label.name);
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal modal-large" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>Gerenciar Labels</h2>
+          <button onClick={onClose} className="modal-close">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="labels-list">
+          {labels.map(label => (
+            <div key={label.id} className="label-item">
+              <span
+                className="label-color-badge"
+                style={{ backgroundColor: LABEL_COLORS[label.color] }}
+              />
+              {editingLabelId === label.id ? (
+                <input
+                  type="text"
+                  value={editingLabelName}
+                  onChange={e => setEditingLabelName(e.target.value)}
+                  onBlur={() => handleUpdateLabel(label.id)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') handleUpdateLabel(label.id);
+                    if (e.key === 'Escape') {
+                      setEditingLabelId(null);
+                      setEditingLabelName('');
+                    }
+                  }}
+                  className="label-edit-input"
+                  autoFocus
+                />
+              ) : (
+                <span className="label-name" onClick={() => startEditing(label)}>
+                  {label.name}
+                </span>
+              )}
+              <button
+                onClick={() => onDeleteLabel(label.id)}
+                className="btn-delete-label"
+                aria-label="Excluir label"
+              >
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <form onSubmit={handleAddLabel} className="add-label-form">
+          <h3>Adicionar Nova Label</h3>
+          <div className="form-row">
+            <div className="form-group">
+              <label>Nome</label>
+              <input
+                type="text"
+                value={newLabelName}
+                onChange={e => setNewLabelName(e.target.value)}
+                placeholder="Nome da label"
+                required
+              />
+            </div>
+            <div className="form-group">
+              <label>Cor</label>
+              <select
+                value={newLabelColor}
+                onChange={e => setNewLabelColor(e.target.value as LabelColor)}
+              >
+                {Object.keys(LABEL_COLORS).map(color => (
+                  <option key={color} value={color}>
+                    {color.charAt(0).toUpperCase() + color.slice(1)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button type="submit" className="btn-primary">
+              Adicionar
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// MAIN APP COMPONENT
+// ============================================================================
+
+const App: React.FC = () => {
+  // Initialize dark mode from storage
+  const [darkMode, setDarkMode] = useState(() => {
+    return StorageService.loadFromStorage(StorageService.getKeys().DARK_MODE, false);
+  });
+
+  // Initialize controller with model loaded from storage
+  const [controller] = useState(() => {
+    const model = KanbanModel.loadFromStorage();
+    return new KanbanController(model);
+  });
+
+  // State management
+  const [, forceUpdate] = useState({});
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedLabels, setSelectedLabels] = useState<string[]>([]);
+  const [dragState, setDragState] = useState<DragState>({
+    draggedCard: null,
+    sourceColumnId: null,
+    isDragging: false
+  });
+  const [dragOverColumnId, setDragOverColumnId] = useState<string | null>(null);
+
+  // Modal states
+  const [addCardModal, setAddCardModal] = useState<{ isOpen: boolean; columnId: string | null }>({
+    isOpen: false,
+    columnId: null
+  });
+  const [addColumnModal, setAddColumnModal] = useState(false);
+  const [manageLabelsModal, setManageLabelsModal] = useState(false);
+
+  // Subscribe to controller changes
+  useEffect(() => {
+    const unsubscribe = controller.subscribe(() => {
+      forceUpdate({});
+    });
+    return unsubscribe;
+  }, [controller]);
+
+  // Update dark mode in DOM and storage
+  useEffect(() => {
+    if (isClient) {
+      document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
+      StorageService.saveToStorage(StorageService.getKeys().DARK_MODE, darkMode);
+    }
+  }, [darkMode]);
+
+  // Get data from controller
+  const columns = controller.getColumns();
+  const labels = controller.getLabels();
+
+  // Compute filtered cards
+  const getFilteredCards = (columnId: string): Card[] => {
+    let cards = controller.getCardsByColumn(columnId);
+
+    // Apply search filter
+    if (searchTerm) {
+      const searchResults = controller.searchCards(searchTerm);
+      cards = cards.filter(card => searchResults.some(sr => sr.id === card.id));
+    }
+
+    // Apply label filter
+    if (selectedLabels.length > 0) {
+      const labelFiltered = controller.filterCardsByLabels(selectedLabels);
+      cards = cards.filter(card => labelFiltered.some(lf => lf.id === card.id));
+    }
+
+    return cards;
+  };
+
+  // Handlers
+  const toggleTheme = () => setDarkMode(!darkMode);
+
+  const handleLabelToggle = (labelId: string) => {
+    setSelectedLabels(prev =>
+      prev.includes(labelId)
+        ? prev.filter(id => id !== labelId)
+        : [...prev, labelId]
+    );
+  };
+
+  const handleAddColumn = (title: string, color: string) => {
+    controller.addColumn(title, color);
+  };
+
+  const handleAddCard = (columnId: string, title: string, description: string) => {
+    controller.addCard({
+      title,
+      description,
+      columnId,
+      labels: []
+    });
+  };
+
+  const handleCardDragStart = (card: Card) => {
+    setDragState({
+      draggedCard: card,
+      sourceColumnId: card.columnId,
+      isDragging: true
+    });
+  };
+
+  const handleCardDragEnd = () => {
+    setDragState({
+      draggedCard: null,
+      sourceColumnId: null,
+      isDragging: false
+    });
+    setDragOverColumnId(null);
+  };
+
+  const handleCardDrop = (targetColumnId: string, targetOrder: number) => {
+    if (dragState.draggedCard) {
+      controller.moveCard(dragState.draggedCard.id, targetColumnId, targetOrder);
+    }
+  };
+
+  const handleDeleteColumn = (columnId: string) => {
+    if (confirm('Deseja realmente excluir esta coluna e todos os seus cards?')) {
+      controller.deleteColumn(columnId);
+    }
+  };
+
+  return (
+    <div className="app">
+      <Header
+        darkMode={darkMode}
+        toggleTheme={toggleTheme}
+        onAddColumn={() => setAddColumnModal(true)}
+      />
+
+      <FilterBar
+        searchTerm={searchTerm}
+        onSearchChange={setSearchTerm}
+        selectedLabels={selectedLabels}
+        onLabelToggle={handleLabelToggle}
+        labels={labels}
+        onManageLabels={() => setManageLabelsModal(true)}
+      />
+
+      <main className="board-container">
+        <div className="board">
+          {columns.map(column => (
+            <ColumnComponent
+              key={column.id}
+              column={column}
+              cards={getFilteredCards(column.id)}
+              labels={labels}
+              onAddCard={() => setAddCardModal({ isOpen: true, columnId: column.id })}
+              onUpdateCard={(cardId, updates) => controller.updateCard(cardId, updates)}
+              onDeleteCard={cardId => {
+                if (confirm('Deseja realmente excluir este card?')) {
+                  controller.deleteCard(cardId);
+                }
+              }}
+              onUpdateColumn={updates => controller.updateColumn(column.id, updates)}
+              onDeleteColumn={() => handleDeleteColumn(column.id)}
+              onCardDragStart={handleCardDragStart}
+              onCardDragEnd={handleCardDragEnd}
+              onCardDrop={targetOrder => handleCardDrop(column.id, targetOrder)}
+              isDraggingOver={dragState.isDragging && dragOverColumnId === column.id}
+            />
+          ))}
+        </div>
+      </main>
+
+      {/* Modals */}
+      <AddCardModal
+        isOpen={addCardModal.isOpen}
+        onClose={() => setAddCardModal({ isOpen: false, columnId: null })}
+        onAdd={(title, description) => {
+          if (addCardModal.columnId) {
+            handleAddCard(addCardModal.columnId, title, description);
+          }
+        }}
+      />
+
+      <AddColumnModal
+        isOpen={addColumnModal}
+        onClose={() => setAddColumnModal(false)}
+        onAdd={handleAddColumn}
+      />
+
+      <ManageLabelsModal
+        isOpen={manageLabelsModal}
+        onClose={() => setManageLabelsModal(false)}
+        labels={labels}
+        onAddLabel={(name, color) => controller.addLabel(name, color)}
+        onUpdateLabel={(id, name) => controller.updateLabel(id, { name })}
+        onDeleteLabel={id => {
+          if (confirm('Deseja realmente excluir esta label?')) {
+            controller.deleteLabel(id);
+          }
+        }}
+      />
+    </div>
+  );
+};
 
 // ============================================================================
 // STYLES
 // ============================================================================
+
 const APP_STYLES = `
-  /* Global Styles */
-  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@400;500;600;700&display=swap');
-  * {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-  }
-  :root {
-    /* Light Theme */
-    --bg-primary: #fafbfc;
-    --bg-secondary: #ffffff;
-    --bg-tertiary: #f5f6f8;
-    --text-primary: #1a1d1f;
-    --text-secondary: #6f767e;
-    --text-tertiary: #9a9fa5;
-    --border-color: #e8eaed;
-    --accent-primary: #2563eb;
-    --accent-hover: #1d4ed8;
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.05);
-    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
-    --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.12);
-    --danger: #ef4444;
-    --success: #10b981;
-  }
-  .dark {
-    --bg-primary: #0d0f11;
-    --bg-secondary: #17191c;
-    --bg-tertiary: #1f2226;
-    --text-primary: #f5f6f8;
-    --text-secondary: #9a9fa5;
-    --text-tertiary: #6f767e;
-    --border-color: #2a2d32;
-    --accent-primary: #3b82f6;
-    --accent-hover: #2563eb;
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
-    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
-    --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.5);
-  }
-  body {
-    font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    transition: background-color 0.3s ease, color 0.3s ease;
-  }
-  .app-container {
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-  }
-  /* Header Styles */
-  .app-header {
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border-color);
-    padding: 1.5rem 2rem;
-    box-shadow: var(--shadow-sm);
-    position: sticky;
-    top: 0;
-    z-index: 100;
-    backdrop-filter: blur(10px);
-  }
+:root {
+  --primary: #3b82f6;
+  --primary-dark: #2563eb;
+  --success: #10b981;
+  --danger: #ef4444;
+  --warning: #f59e0b;
+  
+  --bg: #f1f5f9;
+  --surface: #ffffff;
+  --card-bg: #ffffff;
+  --text: #0f172a;
+  --text-secondary: #64748b;
+  --border: #e2e8f0;
+  --shadow: rgba(0, 0, 0, 0.1);
+  --shadow-lg: rgba(0, 0, 0, 0.15);
+  
+  --header-bg: #ffffff;
+  --header-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+  --column-bg: #f8fafc;
+}
+
+[data-theme="dark"] {
+  --bg: #0f172a;
+  --surface: #1e293b;
+  --card-bg: #1e293b;
+  --text: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --border: #334155;
+  --shadow: rgba(0, 0, 0, 0.3);
+  --shadow-lg: rgba(0, 0, 0, 0.5);
+  
+  --header-bg: #1e293b;
+  --header-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.3);
+  --column-bg: #334155;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--bg);
+  color: var(--text);
+  transition: background-color 0.3s ease, color 0.3s ease;
+  overflow-x: hidden;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Header Styles */
+.header {
+  background: var(--header-bg);
+  box-shadow: var(--header-shadow);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  transition: background-color 0.3s ease;
+}
+
+.header-content {
+  max-width: 100%;
+  margin: 0 auto;
+  padding: 1rem 2rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.header-title {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.header-icon {
+  width: 32px;
+  height: 32px;
+  color: var(--primary);
+}
+
+.header h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.btn-add-column {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.625rem 1.25rem;
+  background: var(--primary);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-add-column:hover {
+  background: var(--primary-dark);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+}
+
+.btn-add-column svg {
+  width: 20px;
+  height: 20px;
+}
+
+.theme-toggle {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 4px var(--shadow);
+}
+
+.theme-toggle:hover {
+  transform: scale(1.05);
+  background: var(--primary);
+  color: white;
+}
+
+.theme-toggle svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* Filter Bar */
+.filter-bar {
+  background: var(--header-bg);
+  padding: 1rem 2rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.search-box {
+  position: relative;
+  flex: 1;
+  min-width: 250px;
+}
+
+.search-box svg {
+  position: absolute;
+  left: 1rem;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  color: var(--text-secondary);
+}
+
+.search-box input {
+  width: 100%;
+  padding: 0.75rem 1rem 0.75rem 3rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9375rem;
+  transition: all 0.2s ease;
+}
+
+.search-box input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.label-filters {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.manage-labels-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.manage-labels-btn:hover {
+  background: var(--primary);
+  color: white;
+  border-color: var(--primary);
+}
+
+.manage-labels-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.label-filter {
+  padding: 0.5rem 1rem;
+  border: 2px solid;
+  border-radius: 6px;
+  background: transparent;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 0.875rem;
+}
+
+.label-filter:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 2px 8px var(--shadow);
+}
+
+.label-filter.active {
+  font-weight: 600;
+}
+
+/* Board Container */
+.board-container {
+  flex: 1;
+  padding: 2rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.board {
+  display: flex;
+  gap: 1.5rem;
+  min-height: calc(100vh - 200px);
+  padding-bottom: 2rem;
+}
+
+/* Column Styles */
+.column {
+  flex-shrink: 0;
+  width: 320px;
+  background: var(--column-bg);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 180px);
+  transition: all 0.2s ease;
+}
+
+.column.drag-over {
+  background: rgba(59, 130, 246, 0.1);
+  box-shadow: 0 0 0 2px var(--primary);
+}
+
+.column-header {
+  padding: 1rem 1.25rem;
+  border-top: 4px solid;
+  border-radius: 12px 12px 0 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--surface);
+  gap: 0.5rem;
+}
+
+.column-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+  cursor: pointer;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: color 0.2s ease;
+}
+
+.column-title:hover {
+  color: var(--primary);
+}
+
+.card-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 0.5rem;
+  background: var(--bg);
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.column-title-input {
+  flex: 1;
+  padding: 0.5rem;
+  border: 2px solid var(--primary);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.column-title-input:focus {
+  outline: none;
+}
+
+.column-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.btn-add-card,
+.btn-delete-column {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+}
+
+.btn-add-card {
+  background: var(--primary);
+  color: white;
+}
+
+.btn-add-card:hover {
+  background: var(--primary-dark);
+  transform: scale(1.05);
+}
+
+.btn-delete-column {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+}
+
+.btn-delete-column:hover {
+  background: var(--danger);
+  color: white;
+  transform: scale(1.05);
+}
+
+.btn-add-card svg,
+.btn-delete-column svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* Cards Container */
+.cards-container {
+  flex: 1;
+  padding: 1rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.cards-container::-webkit-scrollbar {
+  width: 8px;
+}
+
+.cards-container::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.cards-container::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+.cards-container::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+.empty-column {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--text-secondary);
+  padding: 2rem;
+  font-size: 0.875rem;
+}
+
+/* Card Styles */
+.card {
+  background: var(--card-bg);
+  border-radius: 10px;
+  padding: 1rem;
+  box-shadow: 0 2px 4px var(--shadow);
+  cursor: grab;
+  transition: all 0.2s ease;
+  border: 1px solid var(--border);
+}
+
+.card:hover {
+  box-shadow: 0 4px 12px var(--shadow-lg);
+  transform: translateY(-2px);
+}
+
+.card:active {
+  cursor: grabbing;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.card-title {
+  flex: 1;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text);
+  cursor: text;
+  word-break: break-word;
+}
+
+.card-title:hover {
+  color: var(--primary);
+}
+
+.card-title-input {
+  flex: 1;
+  padding: 0.25rem 0.5rem;
+  border: 2px solid var(--primary);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.card-title-input:focus {
+  outline: none;
+}
+
+.card-delete {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.card-delete:hover {
+  background: var(--danger);
+  color: white;
+}
+
+.card-delete svg {
+  width: 14px;
+  height: 14px;
+}
+
+.card-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin-bottom: 0.75rem;
+}
+
+.card-label {
+  padding: 0.25rem 0.625rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: white;
+}
+
+.card-description {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 0.75rem;
+  cursor: text;
+  min-height: 20px;
+  word-break: break-word;
+}
+
+.card-description:hover {
+  color: var(--text);
+}
+
+.card-description-textarea {
+  width: 100%;
+  padding: 0.5rem;
+  border: 2px solid var(--primary);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.875rem;
+  font-family: inherit;
+  resize: vertical;
+  margin-bottom: 0.75rem;
+}
+
+.card-description-textarea:focus {
+  outline: none;
+}
+
+.card-footer {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.btn-add-label {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-add-label:hover {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: white;
+}
+
+.btn-add-label svg {
+  width: 14px;
+  height: 14px;
+}
+
+.label-selector {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.label-option {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.75rem;
+  border: none;
+  border-radius: 6px;
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.label-option:hover {
+  opacity: 1 !important;
+  transform: scale(1.05);
+}
+
+.label-option svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Modal Styles */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+.modal {
+  background: var(--surface);
+  border-radius: 12px;
+  width: 100%;
+  max-width: 500px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px var(--shadow-lg);
+}
+
+.modal-large {
+  max-width: 600px;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-header h2 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.modal-close {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+}
+
+.modal-close:hover {
+  background: var(--danger);
+  color: white;
+}
+
+.modal-close svg {
+  width: 20px;
+  height: 20px;
+}
+
+.modal form {
+  padding: 1.5rem;
+}
+
+.form-group {
+  margin-bottom: 1.25rem;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+  color: var(--text);
+  font-size: 0.875rem;
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 0.9375rem;
+  transition: all 0.2s ease;
+  font-family: inherit;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.color-picker {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 0.5rem;
+}
+
+.color-option {
+  width: 40px;
+  height: 40px;
+  border: 3px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.color-option:hover {
+  transform: scale(1.1);
+}
+
+.color-option.selected {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--text);
+}
+
+.modal-actions {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+  margin-top: 1.5rem;
+}
+
+.btn-primary,
+.btn-secondary {
+  padding: 0.75rem 1.5rem;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 0.9375rem;
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: white;
+}
+
+.btn-primary:hover {
+  background: var(--primary-dark);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+}
+
+.btn-secondary {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+  background: var(--border);
+}
+
+/* Labels Management */
+.labels-list {
+  padding: 1.5rem;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.label-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 0.75rem;
+  transition: all 0.2s ease;
+}
+
+.label-item:hover {
+  box-shadow: 0 2px 8px var(--shadow);
+}
+
+.label-color-badge {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.label-name {
+  flex: 1;
+  font-weight: 500;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.label-name:hover {
+  color: var(--primary);
+}
+
+.label-edit-input {
+  flex: 1;
+  padding: 0.375rem 0.75rem;
+  border: 2px solid var(--primary);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.label-edit-input:focus {
+  outline: none;
+}
+
+.btn-delete-label {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.btn-delete-label:hover {
+  background: var(--danger);
+  color: white;
+  transform: scale(1.05);
+}
+
+.btn-delete-label svg {
+  width: 16px;
+  height: 16px;
+}
+
+.add-label-form {
+  padding: 1.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.add-label-form h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 1rem;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
   .header-content {
-    max-width: 1600px;
-    margin: 0 auto;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 2rem;
+    padding: 1rem;
   }
-  .header-left {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
+
+  .header h1 {
+    font-size: 1.25rem;
   }
-  .app-title {
-    font-family: 'Space Mono', monospace;
-    font-size: 1.75rem;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    background: linear-gradient(135deg, var(--accent-primary) 0%, #8b5cf6 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+
+  .btn-add-column span {
+    display: none;
   }
-  .board-subtitle {
-    font-size: 0.875rem;
-    color: var(--text-secondary);
-    font-weight: 500;
+
+  .filter-bar {
+    padding: 1rem;
   }
-  .header-actions {
-    display: flex;
-    align-items: center;
+
+  .label-filters {
+    width: 100%;
+  }
+
+  .board-container {
+    padding: 1rem;
+  }
+
+  .board {
     gap: 1rem;
   }
-  .search-container {
-    position: relative;
-    display: flex;
-    align-items: center;
-  }
-  .search-icon {
-    position: absolute;
-    left: 0.875rem;
-    color: var(--text-tertiary);
-    pointer-events: none;
-  }
-  .search-input {
-    padding: 0.625rem 1rem 0.625rem 2.5rem;
-    border: 1.5px solid var(--border-color);
-    border-radius: 0.75rem;
-    background: var(--bg-tertiary);
-    color: var(--text-primary);
-    font-size: 0.9375rem;
-    width: 280px;
-    transition: all 0.2s ease;
-    font-family: 'DM Sans', sans-serif;
-  }
-  .search-input:focus {
-    outline: none;
-    border-color: var(--accent-primary);
-    background: var(--bg-secondary);
-    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-  }
-  .filter-button {
-    padding: 0.625rem 0.875rem;
-    border: 1.5px solid var(--border-color);
-    border-radius: 0.75rem;
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
-    cursor: pointer;
-    transition: all 0.2s ease;
-    display: flex;
-    align-items: center;
-  }
-  .filter-button:hover {
-    background: var(--bg-secondary);
-    border-color: var(--accent-primary);
-    color: var(--accent-primary);
-  }
-  .filter-button.active {
-    background: var(--accent-primary);
-    border-color: var(--accent-primary);
-    color: white;
-  }
-  .theme-toggle {
-    padding: 0.625rem 0.875rem;
-    border: 1.5px solid var(--border-color);
-    border-radius: 0.75rem;
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
-    cursor: pointer;
-    transition: all 0.2s ease;
-    display: flex;
-    align-items: center;
-  }
-  .theme-toggle:hover {
-    background: var(--bg-secondary);
-    transform: rotate(15deg) scale(1.05);
-    border-color: var(--accent-primary);
-    color: var(--accent-primary);
-  }
-  /* Filter Panel */
-  .filter-panel {
-    max-width: 1600px;
-    margin: 1.5rem auto 0;
-    padding-top: 1.5rem;
-    border-top: 1px solid var(--border-color);
-  }
-  .filter-title {
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: var(--text-secondary);
-    margin-bottom: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .label-filters {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-  }
-  .label-filter {
-    padding: 0.5rem 1rem;
-    border: 2px solid transparent;
-    border-radius: 0.625rem;
-    background: var(--bg-tertiary);
-    color: var(--text-primary);
-    cursor: pointer;
-    transition: all 0.2s ease;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.875rem;
-    font-weight: 500;
-    position: relative;
-    overflow: hidden;
-  }
-  .label-filter::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 3px;
-    background: var(--label-color);
-    transition: width 0.2s ease;
-  }
-  .label-filter:hover {
-    background: var(--bg-secondary);
-    transform: translateY(-2px);
-  }
-  .label-filter.active {
-    background: var(--label-color);
-    color: white;
-    border-color: var(--label-color);
-  }
-  .label-filter.active::before {
-    width: 100%;
-  }
-  /* Board Container */
-  .board-container {
-    flex: 1;
-    padding: 2rem;
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-  .columns-wrapper {
-    display: flex;
-    gap: 1.5rem;
-    min-height: calc(100vh - 200px);
-    max-width: 1600px;
-    margin: 0 auto;
-  }
-  /* Column Styles */
+
   .column {
-    flex: 0 0 320px;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 1rem;
-    display: flex;
-    flex-direction: column;
-    max-height: calc(100vh - 220px);
-    box-shadow: var(--shadow-sm);
-    transition: all 0.3s ease;
+    width: 280px;
   }
-  .column:hover {
-    box-shadow: var(--shadow-md);
+
+  .form-row {
+    grid-template-columns: 1fr;
   }
-  .column-header {
-    padding: 1.25rem 1.5rem;
-    border-bottom: 1px solid var(--border-color);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    background: var(--bg-tertiary);
-    border-radius: 1rem 1rem 0 0;
-  }
-  .column-title {
-    font-size: 1rem;
-    font-weight: 700;
-    color: var(--text-primary);
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-family: 'Space Mono', monospace;
-    letter-spacing: -0.01em;
-  }
-  .card-count {
-    font-size: 0.75rem;
-    background: var(--accent-primary);
-    color: white;
-    padding: 0.125rem 0.5rem;
-    border-radius: 0.375rem;
-    font-weight: 600;
-  }
-  .column-title-input {
-    flex: 1;
-    padding: 0.5rem;
-    border: 2px solid var(--accent-primary);
-    border-radius: 0.5rem;
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    font-size: 1rem;
-    font-weight: 700;
-    font-family: 'Space Mono', monospace;
-  }
-  .column-delete {
-    padding: 0.375rem;
-    background: transparent;
-    border: none;
-    color: var(--text-tertiary);
-    cursor: pointer;
-    border-radius: 0.375rem;
-    transition: all 0.2s ease;
-    display: flex;
-    align-items: center;
-  }
-  .column-delete:hover {
-    background: var(--danger);
-    color: white;
-  }
-  .cards-container {
-    flex: 1;
-    padding: 1rem;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-    transition: background 0.2s ease;
-  }
-  .cards-container.drag-over {
-    background: rgba(37, 99, 235, 0.05);
-  }
-  .empty-column {
-    padding: 2rem 1rem;
-    text-align: center;
-    color: var(--text-tertiary);
-    font-size: 0.875rem;
-  }
-  /* Card Styles */
-  .card {
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
-    border-radius: 0.75rem;
-    padding: 1rem;
-    cursor: grab;
-    transition: all 0.2s ease;
-    position: relative;
-  }
-  .card:hover {
-    box-shadow: var(--shadow-md);
-    transform: translateY(-2px);
-    border-color: var(--accent-primary);
-  }
-  .card:active {
-    cursor: grabbing;
-  }
-  .card.editing {
-    cursor: default;
-    border-color: var(--accent-primary);
-  }
-  .card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 0.75rem;
-  }
-  .drag-handle {
-    color: var(--text-tertiary);
-    cursor: grab;
-  }
-  .card-actions {
-    display: flex;
-    gap: 0.25rem;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from {
     opacity: 0;
-    transition: opacity 0.2s ease;
+    transform: translateY(10px);
   }
-  .card:hover .card-actions {
+  to {
     opacity: 1;
+    transform: translateY(0);
   }
-  .card-action {
-    padding: 0.25rem;
-    background: transparent;
-    border: none;
-    color: var(--text-tertiary);
-    cursor: pointer;
-    border-radius: 0.25rem;
-    transition: all 0.2s ease;
-    display: flex;
-    align-items: center;
-  }
-  .card-action:hover {
-    background: var(--bg-tertiary);
-    color: var(--accent-primary);
-  }
-  .card-title {
-    font-size: 0.9375rem;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: 0.5rem;
-    line-height: 1.4;
-  }
-  .card-description {
-    font-size: 0.875rem;
-    color: var(--text-secondary);
-    line-height: 1.5;
-    margin-bottom: 0.75rem;
-  }
-  .card-labels {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.375rem;
-    margin-top: 0.75rem;
-  }
-  .label-tag {
-    padding: 0.25rem 0.625rem;
-    border-radius: 0.375rem;
-    font-size: 0.75rem;
-    font-weight: 600;
-    color: white;
-    border: none;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    text-transform: uppercase;
-    letter-spacing: 0.025em;
-  }
-  .label-tag:hover {
-    transform: scale(1.05);
-    box-shadow: var(--shadow-sm);
-  }
-  .label-tag.selected {
-    box-shadow: 0 0 0 2px var(--bg-primary), 0 0 0 4px currentColor;
-  }
-  /* Card Edit Styles */
-  .card-edit-title {
-    width: 100%;
-    padding: 0.625rem;
-    border: 2px solid var(--accent-primary);
-    border-radius: 0.5rem;
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    font-size: 0.9375rem;
-    font-weight: 600;
-    margin-bottom: 0.75rem;
-    font-family: 'DM Sans', sans-serif;
-  }
-  .card-edit-description {
-    width: 100%;
-    padding: 0.625rem;
-    border: 1.5px solid var(--border-color);
-    border-radius: 0.5rem;
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    font-size: 0.875rem;
-    margin-bottom: 0.75rem;
-    resize: vertical;
-    font-family: 'DM Sans', sans-serif;
-    line-height: 1.5;
-  }
-  .card-labels-edit {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.375rem;
-    margin-bottom: 0.75rem;
-  }
-  .card-edit-actions {
-    display: flex;
-    gap: 0.5rem;
-  }
-  .btn-save {
-    flex: 1;
-    padding: 0.625rem;
-    background: var(--accent-primary);
-    color: white;
-    border: none;
-    border-radius: 0.5rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    font-size: 0.875rem;
-  }
-  .btn-save:hover {
-    background: var(--accent-hover);
-    transform: translateY(-1px);
-    box-shadow: var(--shadow-md);
-  }
-  .btn-cancel {
-    flex: 1;
-    padding: 0.625rem;
-    background: var(--bg-tertiary);
-    color: var(--text-primary);
-    border: 1.5px solid var(--border-color);
-    border-radius: 0.5rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    font-size: 0.875rem;
-  }
-  .btn-cancel:hover {
-    background: var(--bg-secondary);
-    border-color: var(--text-tertiary);
-  }
-  /* Add Card Form */
-  .add-card-form {
-    padding: 1rem;
-    background: var(--bg-tertiary);
-    border-radius: 0.75rem;
-    margin: 0 1rem 1rem;
-  }
-  .form-input {
-    width: 100%;
-    padding: 0.625rem;
-    border: 1.5px solid var(--border-color);
-    border-radius: 0.5rem;
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    font-size: 0.9375rem;
-    margin-bottom: 0.625rem;
-    font-family: 'DM Sans', sans-serif;
-  }
-  .form-input:focus {
-    outline: none;
-    border-color: var(--accent-primary);
-  }
-  .form-textarea {
-    width: 100%;
-    padding: 0.625rem;
-    border: 1.5px solid var(--border-color);
-    border-radius: 0.5rem;
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    font-size: 0.875rem;
-    margin-bottom: 0.625rem;
-    resize: vertical;
-    font-family: 'DM Sans', sans-serif;
-  }
-  .form-textarea:focus {
-    outline: none;
-    border-color: var(--accent-primary);
-  }
-  .form-labels {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.375rem;
-    margin-bottom: 0.75rem;
-  }
-  .form-actions {
-    display: flex;
-    gap: 0.5rem;
-  }
-  .btn-primary {
-    flex: 1;
-    padding: 0.625rem;
-    background: var(--accent-primary);
-    color: white;
-    border: none;
-    border-radius: 0.5rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    font-size: 0.875rem;
-  }
-  .btn-primary:hover {
-    background: var(--accent-hover);
-    transform: translateY(-1px);
-  }
-  .btn-secondary {
-    flex: 1;
-    padding: 0.625rem;
-    background: transparent;
-    color: var(--text-primary);
-    border: 1.5px solid var(--border-color);
-    border-radius: 0.5rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    font-size: 0.875rem;
-  }
-  .btn-secondary:hover {
-    background: var(--bg-secondary);
-  }
-  .add-card-button {
-    width: calc(100% - 2rem);
-    margin: 0 1rem 1rem;
-    padding: 0.75rem;
-    background: transparent;
-    color: var(--text-secondary);
-    border: 2px dashed var(--border-color);
-    border-radius: 0.75rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    font-size: 0.875rem;
-  }
-  .add-card-button:hover {
-    background: var(--bg-tertiary);
-    border-color: var(--accent-primary);
-    color: var(--accent-primary);
-  }
-  /* Add Column */
-  .add-column-button {
-    flex: 0 0 280px;
-    background: transparent;
-    border: 2px dashed var(--border-color);
-    border-radius: 1rem;
-    color: var(--text-secondary);
-    cursor: pointer;
-    transition: all 0.2s ease;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.625rem;
-    font-weight: 600;
-    font-size: 0.9375rem;
-    min-height: 120px;
-  }
-  .add-column-button:hover {
-    background: var(--bg-tertiary);
-    border-color: var(--accent-primary);
-    color: var(--accent-primary);
-  }
-  .add-column-form {
-    flex: 0 0 280px;
-    background: var(--bg-secondary);
-    border: 2px solid var(--accent-primary);
-    border-radius: 1rem;
-    padding: 1.5rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 120px;
-  }
-  .column-name-input {
-    width: 100%;
-    padding: 0.75rem;
-    border: none;
-    background: transparent;
-    color: var(--text-primary);
-    font-size: 1rem;
-    font-weight: 700;
-    text-align: center;
-    font-family: 'Space Mono', monospace;
-  }
-  .column-name-input:focus {
-    outline: none;
-  }
-  /* Scrollbar Styles */
-  ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-  }
-  ::-webkit-scrollbar-track {
-    background: var(--bg-tertiary);
-    border-radius: 4px;
-  }
-  ::-webkit-scrollbar-thumb {
-    background: var(--border-color);
-    border-radius: 4px;
-    transition: background 0.2s ease;
-  }
-  ::-webkit-scrollbar-thumb:hover {
-    background: var(--text-tertiary);
-  }
-  /* Animations */
-  @keyframes slideIn {
-    from {
-      opacity: 0;
-      transform: translateY(-10px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-  .column, .card {
-    animation: slideIn 0.3s ease-out;
-  }
-  /* Responsive Design */
-  @media (max-width: 1024px) {
-    .board-container {
-      padding: 1rem;
-    }
-    .header-content {
-      flex-direction: column;
-      align-items: stretch;
-    }
-    .search-input {
-      width: 100%;
-    }
-    .columns-wrapper {
-      flex-direction: column;
-    }
-    .column {
-      flex: 1 1 auto;
-      max-height: none;
-    }
-    .add-column-button {
-      flex: 1 1 auto;
-    }
-  }
+}
+
+.card,
+.column {
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
 `;
+
+// ============================================================================
+// SSR SETUP & EXPORT
+// ============================================================================
+
+// Inject styles into document
+if (isClient) {
+  const styleId = 'app-styles';
+  let styleElement = document.getElementById(styleId);
+
+  if (!styleElement) {
+    styleElement = document.createElement('style');
+    styleElement.id = styleId;
+    styleElement.textContent = APP_STYLES;
+    document.head.appendChild(styleElement);
+  }
+}
+
+export default App;
